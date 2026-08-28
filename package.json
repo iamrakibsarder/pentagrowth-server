@@ -1,0 +1,25 @@
+{
+  "name": "pentagrowth-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "lint": "node --check src/index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.88.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "gray-matter": "^4.0.3",
+    "helmet": "^8.1.0",
+    "marked": "^17.0.1",
+    "multer": "^2.0.2",
+    "sanitize-html": "^2.17.0",
+    "slugify": "^1.6.6",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {}
+}
