@@ -1,0 +1,223 @@
+import { Router } from "express";
+import { randomUUID } from "node:crypto";
+import multer from "multer";
+import { env } from "../config/env.js";
+import { supabase } from "../lib/supabase.js";
+import { asyncHandler, HttpError, requireAdmin } from "../lib/http.js";
+import {
+  estimateReadingTime,
+  htmlToBlocks,
+  makeSlug,
+  markdownToHtml,
+  parseNotionExport,
+  toApiBlog,
+} from "../lib/blog-content.js";
+import { blogInputSchema } from "../lib/validators.js";
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
+});
+
+export const blogsRouter = Router();
+
+function mapBlogInput(input) {
+  const parsed = blogInputSchema.parse(input);
+  const contentHtml = parsed.contentHtml ?? (parsed.contentMarkdown ? markdownToHtml(parsed.contentMarkdown) : null);
+  const contentBlocks = parsed.contentBlocks.length ? parsed.contentBlocks : htmlToBlocks(contentHtml ?? "");
+
+  return {
+    title: parsed.title,
+    slug: makeSlug(parsed.slug ?? parsed.title),
+    excerpt: parsed.excerpt,
+    category: parsed.category,
+    tags: parsed.tags,
+    author_name: parsed.authorName,
+    author_image_url: parsed.authorImageUrl,
+    status: parsed.status,
+    featured: parsed.featured,
+    feature_image_url: parsed.featureImageUrl,
+    feature_image_alt: parsed.featureImageAlt,
+    content_markdown: parsed.contentMarkdown,
+    content_html: contentHtml,
+    content_blocks: contentBlocks,
+    meta_title: parsed.metaTitle || parsed.title,
+    meta_description: parsed.metaDescription || parsed.excerpt,
+    canonical_url: parsed.canonicalUrl,
+    og_title: parsed.ogTitle || parsed.metaTitle || parsed.title,
+    og_description: parsed.ogDescription || parsed.metaDescription || parsed.excerpt,
+    focus_keyword: parsed.focusKeyword,
+    aeo_summary: parsed.aeoSummary || parsed.excerpt,
+    faq: parsed.faq,
+    reading_time_minutes: estimateReadingTime(parsed.contentMarkdown ?? parsed.contentHtml ?? parsed.excerpt ?? ""),
+    published_at: parsed.status === "published" ? parsed.publishedAt ?? new Date().toISOString() : parsed.publishedAt,
+  };
+}
+
+function getStorageImageUrl(pathOrUrl) {
+  if (!pathOrUrl || /^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+  const { data } = supabase.storage.from(env.blogImageBucket).getPublicUrl(pathOrUrl);
+  return data.publicUrl;
+}
+
+function resolveBlogImages(blog) {
+  const image = getStorageImageUrl(blog.image);
+  return {
+    ...blog,
+    image,
+    mainImage: image,
+  };
+}
+
+blogsRouter.get(
+  "/blogs",
+  asyncHandler(async (req, res) => {
+    const includeDrafts = req.query.includeDrafts === "true";
+    let query = supabase
+      .from("blog_posts")
+      .select("*")
+      .order("published_at", { ascending: false, nullsFirst: false })
+      .order("created_at", { ascending: false });
+
+    if (!includeDrafts) query = query.eq("status", "published");
+    if (req.query.category) query = query.eq("category", req.query.category);
+
+    const { data, error } = await query;
+    if (error) throw new HttpError(500, "Unable to fetch blogs.", error);
+
+    const blogs = (data ?? []).map((row) => resolveBlogImages(toApiBlog(row)));
+    res.json({ blogs });
+  }),
+);
+
+blogsRouter.get(
+  "/blogs/:slug",
+  asyncHandler(async (req, res) => {
+    const includeDrafts = req.query.preview === "true";
+    let query = supabase.from("blog_posts").select("*").eq("slug", req.params.slug).limit(1);
+    if (!includeDrafts) query = query.eq("status", "published");
+
+    const { data, error } = await query.single();
+    if (error) throw new HttpError(error.code === "PGRST116" ? 404 : 500, "Blog post not found.", error);
+
+    const blog = resolveBlogImages(toApiBlog(data));
+    const relatedQuery = supabase
+      .from("blog_posts")
+      .select("*")
+      .eq("status", "published")
+      .neq("slug", req.params.slug)
+      .limit(3);
+
+    const { data: relatedData } = await relatedQuery;
+    const relatedPosts = (relatedData ?? []).map((row) => resolveBlogImages(toApiBlog(row)));
+
+    res.json({ blog, relatedPosts });
+  }),
+);
+
+blogsRouter.post(
+  "/admin/blogs",
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const payload = mapBlogInput(req.body);
+    const { data, error } = await supabase.from("blog_posts").insert(payload).select("*").single();
+    if (error) throw new HttpError(400, "Unable to create blog post.", error);
+    res.status(201).json({ blog: resolveBlogImages(toApiBlog(data)) });
+  }),
+);
+
+blogsRouter.put(
+  "/admin/blogs/:id",
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const payload = mapBlogInput(req.body);
+    const { data, error } = await supabase.from("blog_posts").update(payload).eq("id", req.params.id).select("*").single();
+    if (error) throw new HttpError(400, "Unable to update blog post.", error);
+    res.json({ blog: resolveBlogImages(toApiBlog(data)) });
+  }),
+);
+
+blogsRouter.delete(
+  "/admin/blogs/:id",
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { error } = await supabase.from("blog_posts").delete().eq("id", req.params.id);
+    if (error) throw new HttpError(400, "Unable to delete blog post.", error);
+    res.status(204).send();
+  }),
+);
+
+blogsRouter.post(
+  "/admin/blogs/upload-image",
+  requireAdmin,
+  upload.single("image"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw new HttpError(400, "Image file is required.");
+
+    const extension = req.file.originalname.split(".").pop()?.toLowerCase() ?? "webp";
+    const path = `features/${Date.now()}-${randomUUID()}.${extension}`;
+    const { error } = await supabase.storage.from(env.blogImageBucket).upload(path, req.file.buffer, {
+      contentType: req.file.mimetype,
+      upsert: false,
+    });
+    if (error) throw new HttpError(400, "Unable to upload feature image.", error);
+
+    res.status(201).json({ path, url: getStorageImageUrl(path) });
+  }),
+);
+
+blogsRouter.post(
+  "/admin/blogs/import-notion",
+  requireAdmin,
+  upload.fields([
+    { name: "file", maxCount: 1 },
+    { name: "featureImage", maxCount: 1 },
+  ]),
+  asyncHandler(async (req, res) => {
+    const notionFile = req.files?.file?.[0];
+    if (!notionFile) throw new HttpError(400, "Notion Markdown or HTML export is required.");
+
+    const parsed = parseNotionExport(notionFile.buffer, notionFile.originalname);
+    let featureImageUrl = req.body.featureImageUrl || parsed.frontmatter.featureImageUrl || null;
+
+    const featureImage = req.files?.featureImage?.[0];
+    if (featureImage) {
+      const extension = featureImage.originalname.split(".").pop()?.toLowerCase() ?? "webp";
+      const path = `features/${parsed.slug}-${Date.now()}.${extension}`;
+      const { error } = await supabase.storage.from(env.blogImageBucket).upload(path, featureImage.buffer, {
+        contentType: featureImage.mimetype,
+        upsert: false,
+      });
+      if (error) throw new HttpError(400, "Unable to upload feature image.", error);
+      featureImageUrl = path;
+    }
+
+    const payload = mapBlogInput({
+      title: req.body.title || parsed.frontmatter.title || parsed.title,
+      slug: req.body.slug || parsed.frontmatter.slug || parsed.slug,
+      excerpt: req.body.excerpt || parsed.frontmatter.excerpt || parsed.frontmatter.description || null,
+      category: req.body.category || parsed.frontmatter.category || "Insights",
+      tags: Array.isArray(parsed.frontmatter.tags) ? parsed.frontmatter.tags : [],
+      authorName: req.body.authorName || parsed.frontmatter.author || "Pentagrowth Digital",
+      status: req.body.status || parsed.frontmatter.status || "draft",
+      featured: req.body.featured === "true" || parsed.frontmatter.featured === true,
+      featureImageUrl,
+      featureImageAlt: req.body.featureImageAlt || parsed.frontmatter.featureImageAlt || parsed.title,
+      contentMarkdown: parsed.markdown,
+      contentHtml: parsed.html,
+      contentBlocks: parsed.blocks,
+      metaTitle: req.body.metaTitle || parsed.frontmatter.metaTitle || parsed.title,
+      metaDescription: req.body.metaDescription || parsed.frontmatter.metaDescription || parsed.frontmatter.description || null,
+      canonicalUrl: req.body.canonicalUrl || parsed.frontmatter.canonicalUrl || null,
+      ogTitle: req.body.ogTitle || parsed.frontmatter.ogTitle || parsed.title,
+      ogDescription: req.body.ogDescription || parsed.frontmatter.ogDescription || parsed.frontmatter.description || null,
+      focusKeyword: req.body.focusKeyword || parsed.frontmatter.focusKeyword || null,
+      aeoSummary: req.body.aeoSummary || parsed.frontmatter.aeoSummary || parsed.frontmatter.description || null,
+      faq: Array.isArray(parsed.frontmatter.faq) ? parsed.frontmatter.faq : [],
+    });
+
+    const { data, error } = await supabase.from("blog_posts").insert(payload).select("*").single();
+    if (error) throw new HttpError(400, "Unable to import Notion export.", error);
+    res.status(201).json({ blog: resolveBlogImages(toApiBlog(data)) });
+  }),
+);
