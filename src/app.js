@@ -10,7 +10,16 @@ import { backendHomePage, backendNotFoundPage } from "./lib/server-pages.js";
 export function createApp() {
   const app = express();
 
-  app.use(helmet());
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+          "style-src": ["'self'", "'unsafe-inline'"],
+        },
+      },
+    }),
+  );
   app.use(
     cors({
       origin(origin, callback) {
