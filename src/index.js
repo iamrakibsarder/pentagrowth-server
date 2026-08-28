@@ -1,43 +1,23 @@
-import express from "express";
-import cors from "cors";
-import helmet from "helmet";
 import { env } from "./config/env.js";
-import { blogsRouter } from "./routes/blogs.js";
-import { contactsRouter } from "./routes/contacts.js";
-import { seoRouter } from "./routes/seo.js";
+import { createApp } from "./app.js";
 
-const app = express();
+const app = createApp();
 
-app.use(helmet());
-app.use(
-  cors({
-    origin(origin, callback) {
-      if (!origin || env.corsOrigins.includes(origin)) {
-        callback(null, true);
-        return;
-      }
-      callback(new Error("Blocked by CORS."));
-    },
-  }),
-);
-app.use(express.json({ limit: "2mb" }));
-
-app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "pentagrowth-server" });
+const server = app.listen(env.port, env.host, () => {
+  console.log(`Pentagrowth API listening on http://${env.host}:${env.port}`);
 });
 
-app.use("/api", blogsRouter);
-app.use("/api", contactsRouter);
-app.use(seoRouter);
+server.on("error", (error) => {
+  console.error("Pentagrowth API server failed:", error);
+  process.exit(1);
+});
 
-app.use((error, _req, res, _next) => {
-  const status = error.status ?? 500;
-  res.status(status).json({
-    error: error.message ?? "Unexpected server error.",
-    details: env.nodeEnv === "production" ? undefined : error.details ?? error.stack,
+server.on("close", () => {
+  console.log("Pentagrowth API server closed.");
+});
+
+process.on("SIGTERM", () => {
+  server.close(() => {
+    process.exit(0);
   });
-});
-
-app.listen(env.port, () => {
-  console.log(`Pentagrowth API listening on http://localhost:${env.port}`);
 });
