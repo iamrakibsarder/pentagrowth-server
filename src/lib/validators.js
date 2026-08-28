@@ -1,10 +1,14 @@
 import { z } from "zod";
 
 const nullableString = z.string().trim().nullable().optional();
+const optionalTrimmedString = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  z.string().trim().optional(),
+);
 
 export const blogInputSchema = z.object({
   title: z.string().trim().min(3),
-  slug: z.string().trim().min(3).optional(),
+  slug: optionalTrimmedString,
   excerpt: nullableString,
   category: nullableString,
   tags: z.array(z.string().trim().min(1)).default([]),

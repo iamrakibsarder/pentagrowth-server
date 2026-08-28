@@ -17,12 +17,16 @@ export function asyncHandler(handler) {
 }
 
 export function requireAdmin(req, _res, next) {
-  const header = req.get("authorization") ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-
-  if (!process.env.ADMIN_API_TOKEN || token !== process.env.ADMIN_API_TOKEN) {
-    throw new HttpError(401, "Admin authentication required.");
+  if (isAdminRequest(req)) {
+    next();
+    return;
   }
 
-  next();
+  throw new HttpError(401, "Admin authentication required.");
+}
+
+export function isAdminRequest(req) {
+  const header = req.get("authorization") ?? "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  return Boolean(process.env.ADMIN_API_TOKEN && token === process.env.ADMIN_API_TOKEN);
 }
