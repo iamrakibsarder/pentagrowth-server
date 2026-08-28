@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import multer from "multer";
 import { env } from "../config/env.js";
 import { supabase } from "../lib/supabase.js";
-import { asyncHandler, HttpError, requireAdmin } from "../lib/http.js";
+import { asyncHandler, HttpError, isAdminRequest, requireAdmin } from "../lib/http.js";
 import {
   estimateReadingTime,
   htmlToBlocks,
@@ -21,14 +21,54 @@ const upload = multer({
 
 export const blogsRouter = Router();
 
-function mapBlogInput(input) {
+function parseTags(value, fallback = []) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return fallback;
+  return value
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+}
+
+async function ensureUniqueSlug(baseSlug, { postId, explicitSlug }) {
+  const slug = makeSlug(baseSlug);
+  if (!slug) throw new HttpError(400, "A valid slug could not be generated from the title.");
+
+  let query = supabase.from("blog_posts").select("id, slug").eq("slug", slug).limit(1);
+  if (postId) query = query.neq("id", postId);
+
+  const { data: existing, error } = await query.maybeSingle();
+  if (error) throw new HttpError(500, "Unable to validate slug.", error);
+
+  if (!existing) return slug;
+  if (explicitSlug) throw new HttpError(409, "That slug is already used by another blog post.");
+
+  for (let suffix = 2; suffix <= 100; suffix += 1) {
+    const candidate = `${slug}-${suffix}`;
+    let candidateQuery = supabase.from("blog_posts").select("id").eq("slug", candidate).limit(1);
+    if (postId) candidateQuery = candidateQuery.neq("id", postId);
+
+    const { data: candidateExisting, error: candidateError } = await candidateQuery.maybeSingle();
+    if (candidateError) throw new HttpError(500, "Unable to validate slug.", candidateError);
+    if (!candidateExisting) return candidate;
+  }
+
+  throw new HttpError(409, "Too many blog posts share this title. Please enter a custom slug.");
+}
+
+export async function mapBlogInput(input, options = {}) {
   const parsed = blogInputSchema.parse(input);
+  const explicitSlug = Boolean(parsed.slug);
+  const slug = await ensureUniqueSlug(parsed.slug ?? parsed.title, {
+    postId: options.postId,
+    explicitSlug,
+  });
   const contentHtml = parsed.contentHtml ?? (parsed.contentMarkdown ? markdownToHtml(parsed.contentMarkdown) : null);
   const contentBlocks = parsed.contentBlocks.length ? parsed.contentBlocks : htmlToBlocks(contentHtml ?? "");
 
   return {
     title: parsed.title,
-    slug: makeSlug(parsed.slug ?? parsed.title),
+    slug,
     excerpt: parsed.excerpt,
     category: parsed.category,
     tags: parsed.tags,
@@ -73,6 +113,10 @@ blogsRouter.get(
   "/blogs",
   asyncHandler(async (req, res) => {
     const includeDrafts = req.query.includeDrafts === "true";
+    if (includeDrafts && !isAdminRequest(req)) {
+      throw new HttpError(401, "Admin authentication required to list drafts.");
+    }
+
     let query = supabase
       .from("blog_posts")
       .select("*")
@@ -119,7 +163,7 @@ blogsRouter.post(
   "/admin/blogs",
   requireAdmin,
   asyncHandler(async (req, res) => {
-    const payload = mapBlogInput(req.body);
+    const payload = await mapBlogInput(req.body);
     const { data, error } = await supabase.from("blog_posts").insert(payload).select("*").single();
     if (error) throw new HttpError(400, "Unable to create blog post.", error);
     res.status(201).json({ blog: resolveBlogImages(toApiBlog(data)) });
@@ -130,7 +174,7 @@ blogsRouter.put(
   "/admin/blogs/:id",
   requireAdmin,
   asyncHandler(async (req, res) => {
-    const payload = mapBlogInput(req.body);
+    const payload = await mapBlogInput(req.body, { postId: req.params.id });
     const { data, error } = await supabase.from("blog_posts").update(payload).eq("id", req.params.id).select("*").single();
     if (error) throw new HttpError(400, "Unable to update blog post.", error);
     res.json({ blog: resolveBlogImages(toApiBlog(data)) });
@@ -192,12 +236,12 @@ blogsRouter.post(
       featureImageUrl = path;
     }
 
-    const payload = mapBlogInput({
+    const payload = await mapBlogInput({
       title: req.body.title || parsed.frontmatter.title || parsed.title,
       slug: req.body.slug || parsed.frontmatter.slug || parsed.slug,
       excerpt: req.body.excerpt || parsed.frontmatter.excerpt || parsed.frontmatter.description || null,
       category: req.body.category || parsed.frontmatter.category || "Insights",
-      tags: Array.isArray(parsed.frontmatter.tags) ? parsed.frontmatter.tags : [],
+      tags: parseTags(req.body.tags, Array.isArray(parsed.frontmatter.tags) ? parsed.frontmatter.tags : []),
       authorName: req.body.authorName || parsed.frontmatter.author || "Pentagrowth Digital",
       status: req.body.status || parsed.frontmatter.status || "draft",
       featured: req.body.featured === "true" || parsed.frontmatter.featured === true,
