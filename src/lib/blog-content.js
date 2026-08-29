@@ -9,9 +9,14 @@ const allowedTags = new Set([
   "br",
   "code",
   "em",
+  "figcaption",
+  "figure",
   "h1",
   "h2",
   "h3",
+  "h4",
+  "h5",
+  "h6",
   "hr",
   "i",
   "img",
@@ -20,12 +25,20 @@ const allowedTags = new Set([
   "p",
   "pre",
   "strong",
+  "table",
+  "tbody",
+  "td",
+  "th",
+  "thead",
+  "tr",
   "ul",
 ]);
 const voidTags = new Set(["br", "hr", "img"]);
 const allowedAttributes = {
   a: new Set(["href", "title", "target", "rel"]),
   img: new Set(["src", "alt", "title", "width", "height", "loading"]),
+  td: new Set(["colspan", "rowspan"]),
+  th: new Set(["colspan", "rowspan"]),
 };
 
 function escapeAttribute(value = "") {
@@ -75,7 +88,7 @@ function sanitizeAttributes(tag, attrs = "") {
   return safeAttrs.length ? ` ${safeAttrs.join(" ")}` : "";
 }
 
-function sanitizeBlogHtml(html = "") {
+export function sanitizeBlogHtml(html = "") {
   return String(html)
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<(script|style|iframe|object|embed|svg|math|form|input|button|select|textarea|link|meta|base)\b[\s\S]*?<\/\1>/gi, "")
@@ -154,7 +167,7 @@ export function parseNotionExport(buffer, originalName = "notion-export.md") {
   const parsed = isHtml ? { data: {}, content: source } : matter(source);
   const contentHtml = isHtml ? sanitizeBlogHtml(parsed.content) : markdownToHtml(parsed.content);
   const titleFromHeading = parsed.content.match(/^#\s+(.+)$/m)?.[1]?.trim();
-  const title = parsed.data.title ?? titleFromHeading ?? originalName.replace(/\.[^.]+$/, "");
+  const title = parsed.data.title ?? parsed.data.post_title ?? parsed.data.postTitle ?? titleFromHeading ?? originalName.replace(/\.[^.]+$/, "");
 
   return {
     frontmatter: parsed.data,
