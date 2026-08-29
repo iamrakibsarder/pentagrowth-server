@@ -38,6 +38,31 @@ function readFrontmatter(frontmatter, ...keys) {
   return null;
 }
 
+function normalizeText(value = "") {
+  return String(value)
+    .replace(/\s+/g, " ")
+    .replace(/[^\w\s]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function stripDuplicateMarkdownTitle(markdown = "", title = "") {
+  if (!markdown || !title) return markdown;
+
+  return String(markdown).replace(/^\s*#\s+(.+?)(?:\r?\n)+/, (match, heading) =>
+    normalizeText(heading) === normalizeText(title) ? "" : match,
+  );
+}
+
+function stripDuplicateHtmlTitle(html = "", title = "") {
+  if (!html || !title) return html;
+
+  return String(html).replace(/^\s*<h1\b[^>]*>([\s\S]*?)<\/h1>\s*/i, (match, heading) => {
+    const plainHeading = heading.replace(/<[^>]*>/g, "");
+    return normalizeText(plainHeading) === normalizeText(title) ? "" : match;
+  });
+}
+
 async function ensureUniqueSlug(baseSlug, { postId, explicitSlug }) {
   const slug = makeSlug(baseSlug);
   if (!slug) throw new HttpError(400, "A valid slug could not be generated from the title.");
@@ -66,15 +91,17 @@ async function ensureUniqueSlug(baseSlug, { postId, explicitSlug }) {
 
 export async function mapBlogInput(input, options = {}) {
   const parsed = blogInputSchema.parse(input);
+  const contentMarkdown = stripDuplicateMarkdownTitle(parsed.contentMarkdown ?? "", parsed.title) || null;
+  const rawContentHtml = stripDuplicateHtmlTitle(parsed.contentHtml ?? "", parsed.title) || null;
   const explicitSlug = Boolean(parsed.slug);
   const slug = await ensureUniqueSlug(parsed.slug ?? parsed.title, {
     postId: options.postId,
     explicitSlug,
   });
-  const contentHtml = parsed.contentHtml
-    ? sanitizeBlogHtml(parsed.contentHtml)
-    : parsed.contentMarkdown
-      ? markdownToHtml(parsed.contentMarkdown)
+  const contentHtml = rawContentHtml
+    ? sanitizeBlogHtml(rawContentHtml)
+    : contentMarkdown
+      ? markdownToHtml(contentMarkdown)
       : null;
   const contentBlocks = parsed.contentBlocks.length ? parsed.contentBlocks : htmlToBlocks(contentHtml ?? "");
 
@@ -90,7 +117,7 @@ export async function mapBlogInput(input, options = {}) {
     featured: parsed.featured,
     feature_image_url: parsed.featureImageUrl,
     feature_image_alt: parsed.featureImageAlt,
-    content_markdown: parsed.contentMarkdown,
+    content_markdown: contentMarkdown,
     content_html: contentHtml,
     content_blocks: contentBlocks,
     meta_title: parsed.metaTitle || parsed.title,
@@ -101,7 +128,7 @@ export async function mapBlogInput(input, options = {}) {
     focus_keyword: parsed.focusKeyword,
     aeo_summary: parsed.aeoSummary || parsed.excerpt,
     faq: parsed.faq,
-    reading_time_minutes: estimateReadingTime(parsed.contentMarkdown ?? parsed.contentHtml ?? parsed.excerpt ?? ""),
+    reading_time_minutes: estimateReadingTime(contentMarkdown ?? contentHtml ?? parsed.excerpt ?? ""),
     published_at: parsed.status === "published" ? parsed.publishedAt ?? new Date().toISOString() : parsed.publishedAt,
   };
 }
