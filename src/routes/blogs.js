@@ -10,6 +10,7 @@ import {
   makeSlug,
   markdownToHtml,
   parseNotionExport,
+  sanitizeBlogHtml,
   toApiBlog,
 } from "../lib/blog-content.js";
 import { blogInputSchema } from "../lib/validators.js";
@@ -28,6 +29,13 @@ function parseTags(value, fallback = []) {
     .split(",")
     .map((tag) => tag.trim())
     .filter(Boolean);
+}
+
+function readFrontmatter(frontmatter, ...keys) {
+  for (const key of keys) {
+    if (frontmatter[key] !== undefined && frontmatter[key] !== "") return frontmatter[key];
+  }
+  return null;
 }
 
 async function ensureUniqueSlug(baseSlug, { postId, explicitSlug }) {
@@ -63,7 +71,11 @@ export async function mapBlogInput(input, options = {}) {
     postId: options.postId,
     explicitSlug,
   });
-  const contentHtml = parsed.contentHtml ?? (parsed.contentMarkdown ? markdownToHtml(parsed.contentMarkdown) : null);
+  const contentHtml = parsed.contentHtml
+    ? sanitizeBlogHtml(parsed.contentHtml)
+    : parsed.contentMarkdown
+      ? markdownToHtml(parsed.contentMarkdown)
+      : null;
   const contentBlocks = parsed.contentBlocks.length ? parsed.contentBlocks : htmlToBlocks(contentHtml ?? "");
 
   return {
@@ -108,6 +120,50 @@ function resolveBlogImages(blog) {
     mainImage: image,
   };
 }
+
+async function listStorageImages(prefix = "", depth = 0) {
+  if (depth > 4) return [];
+
+  const { data, error } = await supabase.storage.from(env.blogImageBucket).list(prefix, {
+    limit: 200,
+    offset: 0,
+    sortBy: { column: "created_at", order: "desc" },
+  });
+  if (error) throw new HttpError(500, "Unable to fetch blog images.", error);
+
+  const images = [];
+  for (const item of data ?? []) {
+    const path = prefix ? `${prefix}/${item.name}` : item.name;
+    const isFolder = !item.id && !item.metadata?.mimetype;
+
+    if (isFolder) {
+      images.push(...(await listStorageImages(path, depth + 1)));
+      continue;
+    }
+
+    if (!item.name || !/\.(avif|gif|jpe?g|png|svg|webp)$/i.test(item.name)) continue;
+
+    images.push({
+      name: item.name,
+      path,
+      url: getStorageImageUrl(path),
+      size: item.metadata?.size ?? null,
+      createdAt: item.created_at ?? null,
+      updatedAt: item.updated_at ?? null,
+    });
+  }
+
+  return images;
+}
+
+blogsRouter.get(
+  "/admin/blogs/images",
+  requireAdmin,
+  asyncHandler(async (_req, res) => {
+    const images = await listStorageImages();
+    res.json({ images });
+  }),
+);
 
 blogsRouter.get(
   "/blogs",
@@ -222,7 +278,8 @@ blogsRouter.post(
     if (!notionFile) throw new HttpError(400, "Notion Markdown or HTML export is required.");
 
     const parsed = parseNotionExport(notionFile.buffer, notionFile.originalname);
-    let featureImageUrl = req.body.featureImageUrl || parsed.frontmatter.featureImageUrl || null;
+    let featureImageUrl =
+      req.body.featureImageUrl || readFrontmatter(parsed.frontmatter, "featureImageUrl", "feature_image_url") || null;
 
     const featureImage = req.files?.featureImage?.[0];
     if (featureImage) {
@@ -237,7 +294,7 @@ blogsRouter.post(
     }
 
     const payload = await mapBlogInput({
-      title: req.body.title || parsed.frontmatter.title || parsed.title,
+      title: req.body.title || readFrontmatter(parsed.frontmatter, "title", "post_title", "postTitle") || parsed.title,
       slug: req.body.slug || parsed.frontmatter.slug || parsed.slug,
       excerpt: req.body.excerpt || parsed.frontmatter.excerpt || parsed.frontmatter.description || null,
       category: req.body.category || parsed.frontmatter.category || "Insights",
@@ -246,17 +303,17 @@ blogsRouter.post(
       status: req.body.status || parsed.frontmatter.status || "draft",
       featured: req.body.featured === "true" || parsed.frontmatter.featured === true,
       featureImageUrl,
-      featureImageAlt: req.body.featureImageAlt || parsed.frontmatter.featureImageAlt || parsed.title,
+      featureImageAlt: req.body.featureImageAlt || readFrontmatter(parsed.frontmatter, "featureImageAlt", "feature_image_alt") || parsed.title,
       contentMarkdown: parsed.markdown,
       contentHtml: parsed.html,
       contentBlocks: parsed.blocks,
-      metaTitle: req.body.metaTitle || parsed.frontmatter.metaTitle || parsed.title,
-      metaDescription: req.body.metaDescription || parsed.frontmatter.metaDescription || parsed.frontmatter.description || null,
-      canonicalUrl: req.body.canonicalUrl || parsed.frontmatter.canonicalUrl || null,
-      ogTitle: req.body.ogTitle || parsed.frontmatter.ogTitle || parsed.title,
-      ogDescription: req.body.ogDescription || parsed.frontmatter.ogDescription || parsed.frontmatter.description || null,
-      focusKeyword: req.body.focusKeyword || parsed.frontmatter.focusKeyword || null,
-      aeoSummary: req.body.aeoSummary || parsed.frontmatter.aeoSummary || parsed.frontmatter.description || null,
+      metaTitle: req.body.metaTitle || readFrontmatter(parsed.frontmatter, "metaTitle", "meta_title") || parsed.title,
+      metaDescription: req.body.metaDescription || readFrontmatter(parsed.frontmatter, "metaDescription", "meta_description", "description") || null,
+      canonicalUrl: req.body.canonicalUrl || readFrontmatter(parsed.frontmatter, "canonicalUrl", "canonical_url") || null,
+      ogTitle: req.body.ogTitle || readFrontmatter(parsed.frontmatter, "ogTitle", "og_title") || parsed.title,
+      ogDescription: req.body.ogDescription || readFrontmatter(parsed.frontmatter, "ogDescription", "og_description", "description") || null,
+      focusKeyword: req.body.focusKeyword || readFrontmatter(parsed.frontmatter, "focusKeyword", "focus_keyword") || null,
+      aeoSummary: req.body.aeoSummary || readFrontmatter(parsed.frontmatter, "aeoSummary", "aeo_summary", "answerEngineSummary", "answer_engine_summary", "description") || null,
       faq: Array.isArray(parsed.frontmatter.faq) ? parsed.frontmatter.faq : [],
     });
 
