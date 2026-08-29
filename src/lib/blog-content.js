@@ -122,6 +122,10 @@ export function markdownToHtml(markdown = "") {
   return sanitizeBlogHtml(marked.parse(markdown, { async: false }));
 }
 
+function stripLeadingTitleHeading(markdown = "") {
+  return String(markdown).replace(/^\s*#\s+.+(?:\r?\n)+/, "");
+}
+
 export function htmlToBlocks(html = "") {
   const blocks = [];
   const pattern = /<(h2|h3|p|blockquote|li|img)\b([^>]*)>([\s\S]*?)<\/\1>|<img\b([^>]*)\/?>/gi;
@@ -165,18 +169,19 @@ export function parseNotionExport(buffer, originalName = "notion-export.md") {
   const source = buffer.toString("utf8");
   const isHtml = /\.html?$/i.test(originalName);
   const parsed = isHtml ? { data: {}, content: source } : matter(source);
-  const contentHtml = isHtml ? sanitizeBlogHtml(parsed.content) : markdownToHtml(parsed.content);
   const titleFromHeading = parsed.content.match(/^#\s+(.+)$/m)?.[1]?.trim();
   const title = parsed.data.title ?? parsed.data.post_title ?? parsed.data.postTitle ?? titleFromHeading ?? originalName.replace(/\.[^.]+$/, "");
+  const content = isHtml ? parsed.content : stripLeadingTitleHeading(parsed.content);
+  const contentHtml = isHtml ? sanitizeBlogHtml(content) : markdownToHtml(content);
 
   return {
     frontmatter: parsed.data,
     title,
     slug: makeSlug(parsed.data.slug ?? title),
-    markdown: isHtml ? null : parsed.content,
+    markdown: isHtml ? null : content,
     html: contentHtml,
     blocks: htmlToBlocks(contentHtml),
-    readingTimeMinutes: estimateReadingTime(parsed.content),
+    readingTimeMinutes: estimateReadingTime(content),
   };
 }
 
