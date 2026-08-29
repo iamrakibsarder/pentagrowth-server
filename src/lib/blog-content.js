@@ -1,19 +1,96 @@
 import matter from "gray-matter";
 import { marked } from "marked";
-import sanitizeHtml from "sanitize-html";
 import slugify from "slugify";
 
 const WORDS_PER_MINUTE = 225;
-
-const sanitizerConfig = {
-  allowedTags: sanitizeHtml.defaults.allowedTags.concat(["img", "h1", "h2", "h3"]),
-  allowedAttributes: {
-    ...sanitizeHtml.defaults.allowedAttributes,
-    a: ["href", "name", "target", "rel"],
-    img: ["src", "alt", "title", "width", "height", "loading"],
-  },
-  allowedSchemes: ["http", "https", "mailto"],
+const allowedTags = new Set([
+  "a",
+  "blockquote",
+  "br",
+  "code",
+  "em",
+  "h1",
+  "h2",
+  "h3",
+  "hr",
+  "i",
+  "img",
+  "li",
+  "ol",
+  "p",
+  "pre",
+  "strong",
+  "ul",
+]);
+const voidTags = new Set(["br", "hr", "img"]);
+const allowedAttributes = {
+  a: new Set(["href", "title", "target", "rel"]),
+  img: new Set(["src", "alt", "title", "width", "height", "loading"]),
 };
+
+function escapeAttribute(value = "") {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function isSafeUrl(value = "") {
+  const url = String(value).trim().replace(/[\u0000-\u001F\u007F\s]+/g, "");
+  if (!url) return false;
+  return /^(https?:|mailto:|\/(?!\/)|#)/i.test(url);
+}
+
+function stripHtml(html = "") {
+  return String(html).replace(/<[^>]*>/g, "");
+}
+
+function sanitizeAttributes(tag, attrs = "") {
+  const allowedForTag = allowedAttributes[tag];
+  if (!allowedForTag) return "";
+
+  const safeAttrs = [];
+  const attrPattern = /([a-zA-Z0-9:-]+)(?:\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>/=`]+)))?/g;
+
+  for (const match of attrs.matchAll(attrPattern)) {
+    const name = match[1].toLowerCase();
+    const value = match[3] ?? match[4] ?? match[5] ?? "";
+    if (!allowedForTag.has(name) || name.startsWith("on")) continue;
+    if ((name === "href" || name === "src") && !isSafeUrl(value)) continue;
+    safeAttrs.push(`${name}="${escapeAttribute(value)}"`);
+  }
+
+  if (tag === "a") {
+    const hasTargetBlank = safeAttrs.some((attr) => attr === 'target="_blank"');
+    if (hasTargetBlank && !safeAttrs.some((attr) => attr.startsWith("rel="))) {
+      safeAttrs.push('rel="noopener noreferrer"');
+    }
+  }
+
+  if (tag === "img" && !safeAttrs.some((attr) => attr.startsWith("loading="))) {
+    safeAttrs.push('loading="lazy"');
+  }
+
+  return safeAttrs.length ? ` ${safeAttrs.join(" ")}` : "";
+}
+
+function sanitizeBlogHtml(html = "") {
+  return String(html)
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<(script|style|iframe|object|embed|svg|math|form|input|button|select|textarea|link|meta|base)\b[\s\S]*?<\/\1>/gi, "")
+    .replace(/<(script|style|iframe|object|embed|svg|math|form|input|button|select|textarea|link|meta|base)\b[^>]*\/?>/gi, "")
+    .replace(/<\/?([a-zA-Z0-9]+)\b([^>]*)>/g, (full, rawTag, attrs) => {
+      const tag = rawTag.toLowerCase();
+      const isClosing = full.startsWith("</");
+
+      if (!allowedTags.has(tag)) return "";
+      if (isClosing) return voidTags.has(tag) ? "" : `</${tag}>`;
+
+      const safeAttrs = sanitizeAttributes(tag, attrs);
+      return voidTags.has(tag) ? `<${tag}${safeAttrs}>` : `<${tag}${safeAttrs}>`;
+    });
+}
 
 export function makeSlug(value) {
   return slugify(value ?? "", {
@@ -29,7 +106,7 @@ export function estimateReadingTime(input = "") {
 }
 
 export function markdownToHtml(markdown = "") {
-  return sanitizeHtml(marked.parse(markdown, { async: false }), sanitizerConfig);
+  return sanitizeBlogHtml(marked.parse(markdown, { async: false }));
 }
 
 export function htmlToBlocks(html = "") {
@@ -48,7 +125,7 @@ export function htmlToBlocks(html = "") {
     const tag = (match[1] ?? "img").toLowerCase();
     const attrs = match[2] ?? match[4] ?? "";
     const rawText = match[3] ?? "";
-    const text = sanitizeHtml(rawText, { allowedTags: [], allowedAttributes: {} }).trim();
+    const text = stripHtml(rawText).trim();
 
     if (tag !== "li") flushList();
 
@@ -75,7 +152,7 @@ export function parseNotionExport(buffer, originalName = "notion-export.md") {
   const source = buffer.toString("utf8");
   const isHtml = /\.html?$/i.test(originalName);
   const parsed = isHtml ? { data: {}, content: source } : matter(source);
-  const contentHtml = isHtml ? sanitizeHtml(parsed.content, sanitizerConfig) : markdownToHtml(parsed.content);
+  const contentHtml = isHtml ? sanitizeBlogHtml(parsed.content) : markdownToHtml(parsed.content);
   const titleFromHeading = parsed.content.match(/^#\s+(.+)$/m)?.[1]?.trim();
   const title = parsed.data.title ?? titleFromHeading ?? originalName.replace(/\.[^.]+$/, "");
 
