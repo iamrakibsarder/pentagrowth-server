@@ -1,7 +1,5 @@
 import { env } from "./config/env.js";
-import { createApp } from "./app.js";
-
-const app = createApp();
+import { app } from "./app.js";
 
 const server = app.listen(env.port, env.host, () => {
   console.log(`Pentagrowth API listening on http://${env.host}:${env.port}`);
