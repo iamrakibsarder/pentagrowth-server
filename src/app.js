@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import { ZodError } from "zod";
 import { env } from "./config/env.js";
 import { blogsRouter } from "./routes/blogs.js";
 import { contactsRouter } from "./routes/contacts.js";
@@ -60,6 +61,14 @@ export function createApp() {
   });
 
   app.use((error, _req, res, _next) => {
+    if (error instanceof ZodError) {
+      res.status(400).json({
+        error: "Please fix the highlighted fields.",
+        details: error.issues,
+      });
+      return;
+    }
+
     const status = error.status ?? 500;
     res.status(status).json({
       error: error.message ?? "Unexpected server error.",
